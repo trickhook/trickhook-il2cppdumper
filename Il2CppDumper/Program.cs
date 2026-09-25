@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -13,6 +14,12 @@ namespace Il2CppDumper
         [STAThread]
         static void Main(string[] args)
         {
+            // dump.cs, il2cpp.h e script.json sao codigo e JSON, nao texto pro
+            // usuario: formatar numero com a cultura da maquina emitia coisas
+            // como "float x = 0,5" em locale pt-BR, que nem compila.
+            CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+
             config = JsonSerializer.Deserialize<Config>(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));
             string il2cppPath = null;
             string metadataPath = null;
