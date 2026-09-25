@@ -38,7 +38,7 @@ namespace Il2CppDumper
                     if (File.Exists(arg))
                     {
                         var file = File.ReadAllBytes(arg);
-                        if (BitConverter.ToUInt32(file, 0) == 0xFAB11BAF)
+                        if (FFMetadataKey.LooksLikeMetadata(file))
                         {
                             metadataPath = arg;
                         }
@@ -120,6 +120,12 @@ namespace Il2CppDumper
         {
             Console.WriteLine("Initializing metadata...");
             var metadataBytes = File.ReadAllBytes(metadataPath);
+            var metadataKey = FFMetadataKey.Detect(metadataBytes);
+            if (metadataKey != 0)
+            {
+                FFMetadataKey.Apply(metadataBytes, metadataKey);
+                Console.WriteLine($"Metadata was obfuscated with XOR 0x{metadataKey:X2}, deobfuscated.");
+            }
             metadata = new Metadata(new MemoryStream(metadataBytes));
             Console.WriteLine($"Metadata Version: {metadata.Version}");
 
