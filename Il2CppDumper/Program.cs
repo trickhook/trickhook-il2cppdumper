@@ -140,7 +140,7 @@ namespace Il2CppDumper
             var il2cppBytes = File.ReadAllBytes(il2cppPath);
             var unpack = FFProtector.TryUnpack(il2cppBytes, config.UnpackProtected, il2cppPath);
             FFProtector.Report(unpack);
-            FFProtector.Handled = unpack.ChecksumVerified;
+            FFProtector.Record(unpack);
             il2cppBytes = unpack.Data;
             var il2cppMagic = BitConverter.ToUInt32(il2cppBytes, 0);
             var il2CppMemory = new MemoryStream(il2cppBytes);
@@ -255,6 +255,12 @@ namespace Il2CppDumper
                 if (!flag)
                 {
                     Console.WriteLine("ERROR: Can't use auto mode to process file, try manual mode.");
+                    if (FFProtector.WeakIndicator != null)
+                    {
+                        Console.WriteLine($"       The binary has {FFProtector.WeakIndicator}, so it may be " +
+                                          "packed by something this tool does not recognise. Dumping the " +
+                                          "library from memory usually gets around that.");
+                    }
                     Console.Write("Input CodeRegistration: ");
                     var codeRegistration = Convert.ToUInt64(Console.ReadLine(), 16);
                     Console.Write("Input MetadataRegistration: ");

@@ -47,10 +47,7 @@ namespace Il2CppDumper
             if (!IsDumped)
             {
                 RelocationProcessing();
-                if (CheckProtection() && !FFProtector.Handled)
-                {
-                    Console.WriteLine("ERROR: This file may be protected.");
-                }
+                ReportProtection(CheckProtection());
             }
         }
 
@@ -272,15 +269,16 @@ namespace Il2CppDumper
             }
         }
 
-        private bool CheckProtection()
+        /// Devolve o que chamou atencao no arquivo, ou null se nada chamou.
+        /// So descreve o indicio; nao decide se e protecao de verdade.
+        private string CheckProtection()
         {
             try
             {
                 //.init_proc
                 if (dynamicSection.Any(x => x.d_tag == DT_INIT))
                 {
-                    if (!FFProtector.Handled) Console.WriteLine("WARNING: find .init_proc");
-                    return true;
+                    return "an .init_proc entry";
                 }
                 //JNI_OnLoad
                 var dynstrOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_STRTAB).d_un);
@@ -290,21 +288,60 @@ namespace Il2CppDumper
                     switch (name)
                     {
                         case "JNI_OnLoad":
-                            if (!FFProtector.Handled) Console.WriteLine("WARNING: find JNI_OnLoad");
-                            return true;
+                            return "an exported JNI_OnLoad";
                     }
                 }
                 if (sectionTable != null && sectionTable.Any(x => x.sh_type == SHT_LOUSER))
                 {
-                    Console.WriteLine("WARNING: find SHT_LOUSER section");
-                    return true;
+                    return "an SHT_LOUSER section";
                 }
             }
             catch
             {
                 // ignored
             }
-            return false;
+            return null;
+        }
+
+        /// <summary>
+        /// Diz o que sabemos sobre protecao, sem gritar ERROR por causa de um
+        /// indicio que aparece em todo mundo.
+        ///
+        /// .init_proc e JNI_OnLoad estao em praticamente todo libil2cpp.so,
+        /// empacotado ou nao, entao sozinhos nao provam nada. O que prova e o
+        /// resultado do desempacotamento, que se autoverifica pelo CRC32 do
+        /// descritor. Por isso ERROR fica reservado pro unico caso em que a
+        /// saida realmente nao presta.
+        /// </summary>
+        private static void ReportProtection(string indicator)
+        {
+            switch (FFProtector.Status)
+            {
+                case FFProtector.State.Unpacked:
+                case FFProtector.State.AlreadyPlain:
+                    // Ja tratado e conferido byte a byte; nao ha o que avisar.
+                    return;
+
+                case FFProtector.State.Skipped:
+                    Console.WriteLine("NOTE: this file is packed, but UnpackProtected is off in " +
+                                      "config.json, so it was left alone.");
+                    return;
+
+                case FFProtector.State.Failed:
+                    Console.WriteLine("ERROR: the packed section could not be fully recovered, " +
+                                      "so the output below is not trustworthy. Dump the library " +
+                                      "from memory instead (see tools/ffdump.py).");
+                    return;
+
+                default:
+                    // Indicio fraco demais pra dizer qualquer coisa agora: nas
+                    // cinco amostras de Free Fire, .init_proc e JNI_OnLoad
+                    // aparecem em todas, empacotadas ou nao. Fica guardado pro
+                    // caso de a busca automatica falhar, que e quando ele
+                    // finalmente ajuda a explicar o porque.
+                    FFProtector.WeakIndicator = indicator;
+                    return;
+            }
         }
 
         public override ulong GetRVA(ulong pointer)

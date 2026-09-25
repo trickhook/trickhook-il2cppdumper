@@ -41,10 +41,53 @@ namespace Il2CppDumper
     {
         public const uint Magic = 0x12345678;
 
-        /// Setado quando o desempacotamento rodou e o CRC32 do descritor
-        /// fechou. A partir dai o aviso de "file may be protected" do upstream
-        /// so confunde: a protecao ja foi tratada.
-        public static bool Handled;
+        /// O que sabemos sobre a protecao depois de olhar o arquivo. O
+        /// upstream decide isso por heuristica (tem DT_INIT? exporta
+        /// JNI_OnLoad?), mas essas duas coisas estao em praticamente todo
+        /// libil2cpp.so, empacotado ou nao - nas cinco amostras de Free Fire
+        /// que temos, as duas batem em 100% delas, inclusive nas que nao usam
+        /// packer nenhum. Entao a heuristica nao separa nada e o veredito real
+        /// tem que vir daqui, onde de fato desempacotamos e conferimos o CRC.
+        public enum State
+        {
+            /// Nenhum descritor 0x12345678: este packer nao esta no arquivo.
+            NotDetected,
+
+            /// Descritor presente, mas a secao ja esta em claro - tipico de um
+            /// .so tirado da memoria, que o loader ja desempacotou.
+            AlreadyPlain,
+
+            /// Desempacotado e o CRC32 do descritor fechou: byte-exato.
+            Unpacked,
+
+            /// Empacotado e NAO recuperado - seja porque o CRC32 nao fechou,
+            /// seja porque nem deu pra confirmar a chave. A saida nao presta.
+            Failed,
+
+            /// Empacotado, mas o UnpackProtected do config.json esta desligado.
+            Skipped,
+        }
+
+        public static State Status = State.NotDetected;
+
+        /// O indicio fraco que o ELF encontrou (.init_proc, JNI_OnLoad...),
+        /// guardado em vez de impresso. Sozinho ele nao quer dizer nada, mas
+        /// se a busca automatica falhar la na frente ele vira uma pista util.
+        public static string WeakIndicator;
+
+        /// Atalho pra "nao ha nada empacotado atrapalhando daqui pra frente".
+        public static bool Handled => Status == State.Unpacked || Status == State.AlreadyPlain;
+
+        /// Registra o resultado pra quem for reportar protecao mais adiante.
+        public static void Record(Result r)
+        {
+            Status = !r.Detected ? State.NotDetected
+                   : r.SkippedByConfig ? State.Skipped
+                   : r.LooksAlreadyPlain ? State.AlreadyPlain
+                   : !r.Unpacked ? State.Failed        // detectado e desistimos no meio
+                   : r.ChecksumVerified ? State.Unpacked
+                   : State.Failed;
+        }
 
         /// Constante do packer que ofusca os parametros do descritor. Ela
         /// transforma o blob de chave em big-endian 0x20240829 (a data de build
@@ -127,6 +170,13 @@ namespace Il2CppDumper
             public uint ActualCrc;
             public long BytesUnrecovered;
             public string Window0PatchFrom;
+
+            /// Descritor presente mas a secao ja esta em claro (dump de memoria).
+            public bool LooksAlreadyPlain;
+
+            /// Nao tentamos desempacotar porque UnpackProtected esta desligado.
+            public bool SkippedByConfig;
+
             public byte[] Data;
         }
 
@@ -187,7 +237,7 @@ namespace Il2CppDumper
 
             r.Detected = true;
             r.Descriptor = d;
-            if (!enabled) return r;
+            if (!enabled) { r.SkippedByConfig = true; return r; }
 
             long start = d.Offset;
             long end = start + d.Size;
@@ -200,7 +250,7 @@ namespace Il2CppDumper
             // de folga, entao o byte dominante do ciphertext e a propria chave,
             // e 0x00 significa que a secao ja esta em claro (dump de memoria).
             byte hist = MostFrequentByte(data, windows, end);
-            if (hist == 0) return r;
+            if (hist == 0) { r.LooksAlreadyPlain = true; return r; }
 
             var blob = ReadKeyBlob(data, d);
             byte fromByte = KeyFromDescriptorByte(data, d);
