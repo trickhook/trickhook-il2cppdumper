@@ -73,11 +73,24 @@ namespace Il2CppDumper
             0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11
         };
 
-        /// Deslocamento, em slots de 0x10000, da janela de ORIGEM em relacao a
-        /// janela de DESTINO, indexado por (indice_da_janela % 8). Equivale a
-        /// permutar cada grupo de 8 janelas consecutivas por
-        /// sigma = [4, 0, 6, 2, 1, 3, 5, 7].
-        private static readonly int[] SlotDelta = { -1, 0, 4, -1, 4, -1, -3, -2 };
+        /// A regiao permutada comeca na janela 2 e vai ate o ultimo grupo de 8
+        /// completo; dentro de cada grupo as 8 janelas sao reordenadas por uma
+        /// permutacao sigma, onde a janela na posicao p do grupo vem da posicao
+        /// sigma[p].
+        private const int GroupSize = 8;
+        private const int FirstGroupIndex = 2;
+
+        private static readonly int[] Identity = { 0, 1, 2, 3, 4, 5, 6, 7 };
+
+        /// Sigma nao e fixa: cada build do packer usa a sua. Estas sao as ja
+        /// vistas e servem de atalho; qualquer outra sai do solver, que usa o
+        /// CRC32 do descritor como oraculo.
+        private static readonly int[][] KnownPermutations =
+        {
+            new[] { 4, 0, 6, 2, 1, 3, 5, 7 },   // FF global 1.132.1, FF MAX 2.133.1
+            new[] { 3, 4, 0, 2, 6, 1, 5, 7 },   // FF MAX 2.132.1 (arm32 e arm64)
+            Identity,
+        };
 
         public sealed class Descriptor
         {
@@ -104,6 +117,8 @@ namespace Il2CppDumper
             public string KeySource = "";
             public uint AesSeed;
             public string Window0Method = "not attempted";
+            public int[] Permutation = Identity;
+            public string PermutationSource = "";
             public int WindowsTotal;
             public int WindowsRecovered;
             public int WindowsSkipped;
@@ -184,7 +199,7 @@ namespace Il2CppDumper
             // no texto claro de um .rodata o mais comum e 0x00 com varias vezes
             // de folga, entao o byte dominante do ciphertext e a propria chave,
             // e 0x00 significa que a secao ja esta em claro (dump de memoria).
-            byte hist = MostFrequentByte(data, windows, start, end);
+            byte hist = MostFrequentByte(data, windows, end);
             if (hist == 0) return r;
 
             var blob = ReadKeyBlob(data, d);
@@ -198,7 +213,7 @@ namespace Il2CppDumper
             if (fromByte != 0 && fromByte == fromBlob) { key = fromByte; src = "descriptor"; }
             else if (fromByte != 0 && fromByte == hist) { key = fromByte; src = "descriptor + histogram"; }
             else if (fromBlob != 0 && fromBlob == hist) { key = fromBlob; src = "key blob + histogram"; }
-            else if (BestByTextScore(data, windows, start, end) == hist) { key = hist; src = "histogram"; }
+            else if (BestByTextScore(data, windows, end) == hist) { key = hist; src = "histogram"; }
             else
             {
                 Console.WriteLine("WARNING: packed section detected but the key could not be confirmed; leaving it alone.");
@@ -218,6 +233,7 @@ namespace Il2CppDumper
                     outBuf[i] = (byte)(data[i] ^ key);
                 r.WindowsRecovered = windows.Count;
                 r.Window0Method = "n/a (small section, plain XOR)";
+                r.PermutationSource = "n/a (small section)";
             }
             else
             {
@@ -242,39 +258,67 @@ namespace Il2CppDumper
                 }
 
                 // Resto: XOR + permutacao entre slots (algo 1) ou XOR puro (algo 2).
-                bool permute = d.Algo != 2;
                 int n = windows.Count;
-                int lastGroupStart = 2 + 8 * ((n - 2) / 8);
+                int lastGroupStart = FirstGroupIndex + GroupSize * ((n - FirstGroupIndex) / GroupSize);
 
-                foreach (var (index, dst) in windows)
+                // A ULTIMA janela nao e cortada em 0x4000: ela vai ate o fim da
+                // secao. No build arm32 isso e 0x9FEC em vez de 0x4000.
+                int WindowLength(int index) =>
+                    (int)(index == n - 1 ? end - windows[index].start
+                                         : Math.Min(WindowSize, end - windows[index].start));
+
+                // Janelas fora da regiao permutada: so XOR, sem depender de sigma.
+                // Elas entram no buffer antes do solver porque o oraculo compara
+                // o CRC da secao inteira.
+                for (int index = 1; index < n; index++)
                 {
-                    if (index == 0) continue;   // ja tratada acima
-
-                    long delta = (!permute || index >= lastGroupStart)
-                        ? 0
-                        : (long)SlotDelta[index % SlotDelta.Length] * SlotStride;
-                    long srcPos = dst + delta;
-
-                    // A ULTIMA janela nao e cortada em 0x4000: ela vai ate o fim
-                    // da secao. No build arm32 isso e 0x9FEC em vez de 0x4000.
-                    int len = (int)(index == n - 1 ? end - dst : Math.Min(WindowSize, end - dst));
-
-                    if (srcPos < start || srcPos + len > end)
-                    {
-                        r.WindowsSkipped++;
-                        r.BytesUnrecovered += len;
-                        continue;
-                    }
+                    if (index >= FirstGroupIndex && index < lastGroupStart) continue;
+                    long dst = windows[index].start;
+                    int len = WindowLength(index);
+                    if (len <= 0) { r.WindowsSkipped++; continue; }
                     for (int i = 0; i < len; i++)
-                        outBuf[dst + i] = (byte)(data[srcPos + i] ^ key);
+                        outBuf[dst + i] = (byte)(data[dst + i] ^ key);
                     r.WindowsRecovered++;
+                }
+
+                var sigma = SolvePermutation(data, outBuf, windows, start, end,
+                                             lastGroupStart, key, d.Checksum, out var sigmaSource);
+                if (sigma == null)
+                {
+                    sigma = d.Algo != 2 ? KnownPermutations[0] : Identity;
+                    sigmaSource = d.Algo != 2 ? "fallback table" : "identity (algo 2)";
+                }
+                r.Permutation = sigma;
+                r.PermutationSource = sigmaSource;
+
+                for (int index = FirstGroupIndex; index < lastGroupStart; index += GroupSize)
+                {
+                    int groupEnd = Math.Min(index + GroupSize, lastGroupStart);
+                    for (int p = 0; p < groupEnd - index; p++)
+                    {
+                        int member = index + p;
+                        int source = index + sigma[p];
+                        long dst = windows[member].start;
+                        int len = WindowLength(member);
+                        long srcPos = source < n ? windows[source].start : -1;
+
+                        if (len <= 0 || srcPos < start || srcPos + len > end)
+                        {
+                            r.WindowsSkipped++;
+                            r.BytesUnrecovered += Math.Max(len, 0);
+                            continue;
+                        }
+                        for (int i = 0; i < len; i++)
+                            outBuf[dst + i] = (byte)(data[srcPos + i] ^ key);
+                        r.WindowsRecovered++;
+                    }
                 }
             }
 
             // descritor+0x20 e o CRC32 da secao em claro, entao da pra conferir
             // o resultado sem precisar de um dump de memoria pra comparar.
             r.ExpectedCrc = d.Checksum;
-            r.ActualCrc = Crc32(outBuf, start, end - start);
+            r.ActualCrc = FFCrc32.Compute(outBuf, start, end - start);
             r.ChecksumVerified = r.ActualCrc == r.ExpectedCrc;
 
             // Rede de seguranca: se a cifra da janela 0 mudar num build futuro,
@@ -282,7 +326,7 @@ namespace Il2CppDumper
             if (!r.ChecksumVerified &&
                 FFWindow0Patch.TryApply(outBuf, d.Checksum, inputPath, out var patchFrom))
             {
-                r.ActualCrc = Crc32(outBuf, start, end - start);
+                r.ActualCrc = FFCrc32.Compute(outBuf, start, end - start);
                 r.ChecksumVerified = r.ActualCrc == r.ExpectedCrc;
                 if (r.ChecksumVerified)
                 {
@@ -294,6 +338,103 @@ namespace Il2CppDumper
             r.Unpacked = true;
             r.Data = outBuf;
             return r;
+        }
+
+        /// <summary>
+        /// Descobre a permutacao de janelas usando o CRC32 em claro guardado no
+        /// descritor como oraculo.
+        ///
+        /// <paramref name="outBuf"/> ja precisa ter a janela 0 decifrada e as
+        /// janelas fora da regiao permutada aplicadas; as janelas permutadas
+        /// ainda estao com o conteudo empacotado.
+        ///
+        /// Como o CRC32 e afim, o CRC final e "base XOR uma contribuicao por
+        /// janela", e as contribuicoes de cada posicao p do grupo podem ser
+        /// somadas de antemao. Sobram 8 XORs por candidata, entao varrer as
+        /// 40320 permutacoes e instantaneo.
+        /// </summary>
+        private static int[] SolvePermutation(byte[] data, byte[] outBuf,
+                                              List<(int index, long start)> windows,
+                                              long start, long end, int lastGroupStart,
+                                              byte key, uint target, out string source)
+        {
+            source = "";
+            int count = lastGroupStart - FirstGroupIndex;
+            if (count <= 0) return null;
+
+            // O solver assume janelas inteiras; se a ultima permutada for curta,
+            // deixa pro caminho normal com a tabela conhecida.
+            if (windows[lastGroupStart - 1].start + WindowSize > end) return null;
+
+            long total = end - start;
+            uint zeroCrc = FFCrc32.OfZeros(WindowSize);
+
+            var keyBlock = new byte[WindowSize];
+            for (int i = 0; i < WindowSize; i++) keyBlock[i] = key;
+            uint keyCrc = FFCrc32.Compute(keyBlock, 0, WindowSize);
+
+            // Base = CRC da secao com as janelas permutadas zeradas. Zerar e
+            // remover a contribuicao do que esta la agora.
+            uint baseCrc = FFCrc32.Compute(outBuf, start, total);
+            var rests = new long[count];
+            for (int k = 0; k < count; k++)
+            {
+                long at = windows[FirstGroupIndex + k].start;
+                long rest = total - (at - start) - WindowSize;
+                rests[k] = rest;
+                uint present = FFCrc32.Compute(outBuf, at, WindowSize) ^ zeroCrc;
+                baseCrc ^= FFCrc32.Combine(present, 0, rest);
+            }
+
+            // Contribuicao de cada origem possivel, ja somada por posicao no grupo.
+            var aggregate = new uint[GroupSize][];
+            for (int p = 0; p < GroupSize; p++) aggregate[p] = new uint[GroupSize];
+            for (int k = 0; k < count; k++)
+            {
+                int groupBase = FirstGroupIndex + GroupSize * (k / GroupSize);
+                int p = k % GroupSize;
+                for (int j = 0; j < GroupSize; j++)
+                {
+                    long at = windows[groupBase + j].start;
+                    uint term = FFCrc32.Compute(data, at, WindowSize) ^ keyCrc;
+                    aggregate[p][j] ^= FFCrc32.Combine(term, 0, rests[k]);
+                }
+            }
+
+            uint Evaluate(int[] candidate)
+            {
+                uint acc = baseCrc;
+                for (int p = 0; p < GroupSize; p++) acc ^= aggregate[p][candidate[p]];
+                return acc;
+            }
+
+            foreach (var known in KnownPermutations)
+            {
+                if (Evaluate(known) != target) continue;
+                source = known == Identity ? "identity, CRC32 verified" : "known table, CRC32 verified";
+                return known;
+            }
+
+            var sigma = new int[GroupSize];
+            var used = new bool[GroupSize];
+
+            bool Search(int p, uint acc)
+            {
+                if (p == GroupSize) return acc == target;
+                for (int j = 0; j < GroupSize; j++)
+                {
+                    if (used[j]) continue;
+                    used[j] = true;
+                    sigma[p] = j;
+                    if (Search(p + 1, acc ^ aggregate[p][j])) return true;
+                    used[j] = false;
+                }
+                return false;
+            }
+
+            if (!Search(0, baseCrc)) return null;
+            source = "solved from CRC32";
+            return sigma;
         }
 
         /// Janela 0: AES-128-CBC em blocos independentes de 0x800, IV fixo
@@ -370,17 +511,17 @@ namespace Il2CppDumper
             return list;
         }
 
-        /// Byte mais frequente nas janelas de origem da regiao empacotada.
+        /// Byte mais frequente nas janelas empacotadas. A permutacao so
+        /// reordena janelas inteiras, entao o histograma do conjunto nao depende
+        /// dela e pode ser tirado das janelas no lugar em que estao.
         private static byte MostFrequentByte(byte[] data, List<(int index, long start)> windows,
-                                             long start, long end)
+                                             long end)
         {
             var hist = new long[256];
-            foreach (var (index, dst) in windows)
+            foreach (var (_, at) in windows)
             {
-                long src = dst + (long)SlotDelta[index % SlotDelta.Length] * SlotStride;
-                if (src < start) continue;
-                long len = Math.Min(WindowSize, end - src);
-                for (long i = 0; i < len; i++) hist[data[src + i]]++;
+                long len = Math.Min(WindowSize, end - at);
+                for (long i = 0; i < len; i++) hist[data[at + i]]++;
             }
             byte best = 0;
             for (int i = 1; i < 256; i++) if (hist[i] > hist[best]) best = (byte)i;
@@ -389,7 +530,7 @@ namespace Il2CppDumper
 
         /// Chave que maximiza NUL*4 + ASCII imprimivel, amostrando o inicio das janelas.
         private static byte BestByTextScore(byte[] data, List<(int index, long start)> windows,
-                                            long start, long end)
+                                            long end)
         {
             const int Sample = 512;
             byte best = 0;
@@ -397,13 +538,12 @@ namespace Il2CppDumper
             for (int k = 0; k < 256; k++)
             {
                 long score = 0;
-                foreach (var (index, dst) in windows)
+                foreach (var (_, at) in windows)
                 {
-                    long src = dst + (long)SlotDelta[index % SlotDelta.Length] * SlotStride;
-                    if (src < start || src + Sample > end) continue;
+                    if (at + Sample > end) continue;
                     for (int i = 0; i < Sample; i++)
                     {
-                        byte v = (byte)(data[src + i] ^ (byte)k);
+                        byte v = (byte)(data[at + i] ^ (byte)k);
                         if (v == 0) score += 4;
                         else if (v >= 0x20 && v <= 0x7e) score++;
                     }
@@ -411,28 +551,6 @@ namespace Il2CppDumper
                 if (score > bestScore) { bestScore = score; best = (byte)k; }
             }
             return best;
-        }
-
-        private static readonly uint[] CrcTable = BuildCrcTable();
-
-        private static uint[] BuildCrcTable()
-        {
-            var t = new uint[256];
-            for (uint i = 0; i < 256; i++)
-            {
-                uint c = i;
-                for (int k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-                t[i] = c;
-            }
-            return t;
-        }
-
-        private static uint Crc32(byte[] data, long offset, long length)
-        {
-            uint c = 0xFFFFFFFFu;
-            for (long i = 0; i < length; i++)
-                c = CrcTable[(c ^ data[offset + i]) & 0xFF] ^ (c >> 8);
-            return c ^ 0xFFFFFFFFu;
         }
 
         public static void Report(Result r)
@@ -448,6 +566,7 @@ namespace Il2CppDumper
                               $"window 0 via {r.Window0Method}" +
                               (r.AesSeed != 0 ? $" seed 0x{r.AesSeed:x8}" : "") +
                               $": {r.WindowsRecovered}/{r.WindowsTotal} windows recovered");
+            Console.WriteLine($"  Window permutation {string.Join(",", r.Permutation)} ({r.PermutationSource})");
             if (r.Window0PatchFrom != null)
                 Console.WriteLine($"  Window 0 restored from {r.Window0PatchFrom}");
             if (r.ChecksumVerified)
