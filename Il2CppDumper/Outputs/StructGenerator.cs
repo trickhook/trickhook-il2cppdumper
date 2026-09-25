@@ -373,9 +373,9 @@ namespace Il2CppDumper
                 address = $"0x{x.Address:X}"
             }).ToArray();
             var jsonOptions = new JsonSerializerOptions() { WriteIndented = true, IncludeFields = true };
-            File.WriteAllText(outputDir + "stringliteral.json", JsonSerializer.Serialize(stringLiterals, jsonOptions), new UTF8Encoding(false));
+            File.WriteAllText(outputDir + "stringliteral.json", Json(stringLiterals, jsonOptions), new UTF8Encoding(false));
             //写入文件
-            File.WriteAllText(outputDir + "script.json", JsonSerializer.Serialize(json, jsonOptions));
+            File.WriteAllText(outputDir + "script.json", Json(json, jsonOptions), new UTF8Encoding(false));
             //il2cpp.h
             for (int i = 0; i < genericClassList.Count; i++)
             {
@@ -430,6 +430,17 @@ namespace Il2CppDumper
             sb.Append(methodInfoHeader);
             File.WriteAllText(outputDir + "il2cpp.h", sb.ToString());
         }
+
+        /// <summary>
+        /// Serializa com quebra de linha fixa em LF. O WriteIndented do
+        /// System.Text.Json indenta com o Environment.NewLine, entao o mesmo
+        /// binario gera script.json diferente no Windows e no Linux, e
+        /// diferente do que o app mobile gera. Um CR cru so pode ser
+        /// indentacao: dentro de string o serializador escapa controle como
+        /// duas letras, nunca como o byte. Entao trocar e seguro.
+        /// </summary>
+        private static string Json<T>(T value, JsonSerializerOptions options) =>
+            JsonSerializer.Serialize(value, options).Replace("\r\n", "\n");
 
         private void AddMetadataUsageTypeInfo(ScriptJson json, uint index, ulong address)
         {
