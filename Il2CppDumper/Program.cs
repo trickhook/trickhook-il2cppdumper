@@ -20,6 +20,11 @@ namespace Il2CppDumper
             CultureInfo.DefaultThreadCurrentCulture = CultureInfo.InvariantCulture;
             CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
 
+            // Sem isto nao da pra saber de qual build veio um log colado num
+            // report de bug, que e quando a versao importa.
+            var build = typeof(Program).Assembly.GetName().Version;
+            Console.WriteLine($"Il2CppDumper {build.Major}.{build.Minor} - Free Fire fork");
+
             config = JsonSerializer.Deserialize<Config>(File.ReadAllText(AppDomain.CurrentDomain.BaseDirectory + @"config.json"));
             string il2cppPath = null;
             string metadataPath = null;
