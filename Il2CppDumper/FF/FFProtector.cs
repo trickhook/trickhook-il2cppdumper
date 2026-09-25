@@ -411,28 +411,64 @@ namespace Il2CppDumper
             source = "";
             int count = lastGroupStart - FirstGroupIndex;
             if (count <= 0) return null;
+            int n = windows.Count;
 
-            // O solver assume janelas inteiras; se a ultima permutada for curta,
-            // deixa pro caminho normal com a tabela conhecida.
-            if (windows[lastGroupStart - 1].start + WindowSize > end) return null;
+            // Comprimento que o aplicador VAI escrever nesta janela. A ultima
+            // janela da secao nao e cortada em 0x4000, entao quando ela cai
+            // dentro da faixa permutada o solver tem que modelar o tamanho
+            // real - senao o oraculo nunca fecha e caimos na tabela fixa.
+            int LengthOf(int index) =>
+                (int)(index == n - 1 ? end - windows[index].start
+                                     : Math.Min(WindowSize, end - windows[index].start));
+
+            // Uma origem so serve se couber no comprimento do DESTINO. Se
+            // alguma nao couber o aplicador pula a janela e deixa cifrado, e
+            // ai nenhum CRC fecha: melhor nem tentar resolver.
+            for (int k = 0; k < count; k++)
+            {
+                int index = FirstGroupIndex + k;
+                int groupBase = FirstGroupIndex + GroupSize * (k / GroupSize);
+                int len = LengthOf(index);
+                if (len <= 0) return null;
+                for (int j = 0; j < GroupSize; j++)
+                {
+                    if (groupBase + j >= n) return null;
+                    if (windows[groupBase + j].start + len > end) return null;
+                }
+            }
 
             long total = end - start;
-            uint zeroCrc = FFCrc32.OfZeros(WindowSize);
 
-            var keyBlock = new byte[WindowSize];
-            for (int i = 0; i < WindowSize; i++) keyBlock[i] = key;
-            uint keyCrc = FFCrc32.Compute(keyBlock, 0, WindowSize);
+            // So ha dois comprimentos possiveis (0x4000 e a cauda), entao um
+            // cache minusculo evita recalcular os CRCs de apoio.
+            var zeroCache = new Dictionary<int, uint>();
+            var keyCache = new Dictionary<int, uint>();
+            uint ZeroCrc(int len)
+            {
+                if (zeroCache.TryGetValue(len, out var v)) return v;
+                return zeroCache[len] = FFCrc32.OfZeros(len);
+            }
+            uint KeyCrc(int len)
+            {
+                if (keyCache.TryGetValue(len, out var v)) return v;
+                var block = new byte[len];
+                for (int i = 0; i < len; i++) block[i] = key;
+                return keyCache[len] = FFCrc32.Compute(block, 0, len);
+            }
 
             // Base = CRC da secao com as janelas permutadas zeradas. Zerar e
             // remover a contribuicao do que esta la agora.
             uint baseCrc = FFCrc32.Compute(outBuf, start, total);
             var rests = new long[count];
+            var lens = new int[count];
             for (int k = 0; k < count; k++)
             {
                 long at = windows[FirstGroupIndex + k].start;
-                long rest = total - (at - start) - WindowSize;
+                int len = LengthOf(FirstGroupIndex + k);
+                long rest = total - (at - start) - len;
                 rests[k] = rest;
-                uint present = FFCrc32.Compute(outBuf, at, WindowSize) ^ zeroCrc;
+                lens[k] = len;
+                uint present = FFCrc32.Compute(outBuf, at, len) ^ ZeroCrc(len);
                 baseCrc ^= FFCrc32.Combine(present, 0, rest);
             }
 
@@ -446,7 +482,7 @@ namespace Il2CppDumper
                 for (int j = 0; j < GroupSize; j++)
                 {
                     long at = windows[groupBase + j].start;
-                    uint term = FFCrc32.Compute(data, at, WindowSize) ^ keyCrc;
+                    uint term = FFCrc32.Compute(data, at, lens[k]) ^ KeyCrc(lens[k]);
                     aggregate[p][j] ^= FFCrc32.Combine(term, 0, rests[k]);
                 }
             }
