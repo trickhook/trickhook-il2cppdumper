@@ -40,6 +40,10 @@ namespace Il2CppDumper
 
         private readonly Dictionary<uint, string> stringCache = new();
 
+        /// Dialeto compacto detectado, ou null quando o metadata e padrao (ver
+        /// FF/CompactMetadata.cs). Nada no caminho padrao depende disso.
+        private readonly CompactMetadata compact;
+
         public Metadata(Stream stream) : base(stream)
         {
             var sanity = ReadUInt32();
@@ -74,6 +78,11 @@ namespace Il2CppDumper
                     }
                 }
             }
+            // Unico gancho do dialeto compacto: dali pra frente cada tabela que
+            // o dialeto conhece e reempacotada no layout padrao antes de chegar
+            // no parser. Tem que ser aqui, antes da primeira tabela, porque o
+            // imageDefs tambem encolheu nesses builds.
+            compact = CompactMetadata.TryDetect(this);
             imageDefs = ReadMetadataClassArray<Il2CppImageDefinition>(header.imagesOffset, header.imagesSize);
             if (Version == 24.2 && header.assembliesSize / 68 < imageDefs.Length)
             {
@@ -157,15 +166,46 @@ namespace Il2CppDumper
             }
         }
 
-        private T[] ReadMetadataClassArray<T>(uint addr, int count) where T : new()
+        private T[] ReadMetadataClassArray<T>(uint addr, int size) where T : new()
         {
-            return ReadClassArray<T>(addr, count / SizeOf(typeof(T)));
+            var standardSize = SizeOf(typeof(T));
+            if (compact != null && compact.TryTranscode<T>(this, addr, size, standardSize, out var buffer, out var count))
+            {
+                return ParseBuffer<T>(buffer, count);
+            }
+            return ReadClassArray<T>(addr, size / standardSize);
         }
 
         /// Le a tabela de metodos detectando layouts nao-padrao (ver FFMethodLayout).
         private Il2CppMethodDefinition[] ReadMethodDefs()
         {
             var expected = SizeOf(typeof(Il2CppMethodDefinition));
+
+            // Os dois detectores tratam de casos opostos e sao mutuamente
+            // exclusivos por construcao: o FFMethodLayout procura um struct
+            // MAIOR que o padrao (campo extra, que ele remove), e o dialeto
+            // compacto exige um struct MENOR. Se um arquivo satisfizesse os
+            // dois, repackar duas vezes daria lixo silencioso - entao dizemos
+            // isso em voz alta e ficamos com o compacto, que e o unico que
+            // valida contra a soma dos method_count.
+            if (compact != null && compact.Handles(typeof(Il2CppMethodDefinition)))
+            {
+                var ffCount = FFMethodLayout.CountFromTypeDefs(typeDefs);
+                if (ffCount > 0 && header.methodsSize % ffCount == 0)
+                {
+                    var ffStride = header.methodsSize / ffCount;
+                    var ffPad = ffStride - expected;
+                    if (ffPad > 0 && ffPad <= FFMethodLayout.MaxPadding)
+                    {
+                        Console.WriteLine($"WARNING: both layout detectors match this method table: the compact " +
+                                          $"dialect '{compact.Name}' and the FFMethodLayout padding probe " +
+                                          $"({ffStride} bytes with {ffPad} extra). Using the compact dialect, which " +
+                                          "is the one cross-checked against the type definitions.");
+                    }
+                }
+                return ReadMetadataClassArray<Il2CppMethodDefinition>(header.methodsOffset, header.methodsSize);
+            }
+
             var count = FFMethodLayout.CountFromTypeDefs(typeDefs);
             if (count <= 0 || header.methodsSize <= 0 || header.methodsSize % count != 0)
                 return ReadMetadataClassArray<Il2CppMethodDefinition>(header.methodsOffset, header.methodsSize);
@@ -224,9 +264,15 @@ namespace Il2CppDumper
 
         private Il2CppMethodDefinition[] ParseMethodDefs(byte[] buffer, int count)
         {
+            return ParseBuffer<Il2CppMethodDefinition>(buffer, count);
+        }
+
+        /// Le um array de registros de um buffer que ja esta no layout padrao.
+        private T[] ParseBuffer<T>(byte[] buffer, int count) where T : new()
+        {
             using var ms = new MemoryStream(buffer);
             var bs = new BinaryStream(ms) { Version = Version, Is32Bit = Is32Bit };
-            return bs.ReadClassArray<Il2CppMethodDefinition>(0ul, (long)count);
+            return bs.ReadClassArray<T>(0ul, (long)count);
         }
 
         public bool GetFieldDefaultValueFromIndex(int index, out Il2CppFieldDefaultValue value)
