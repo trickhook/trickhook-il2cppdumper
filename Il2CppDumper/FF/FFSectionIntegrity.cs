@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace Il2CppDumper
 {
@@ -70,6 +71,54 @@ namespace Il2CppDumper
         /// tirar a opcao da pessoa.
         /// </summary>
         public static bool Check(byte[] image, FFProtector.Descriptor d, bool unpackDisabledByConfig)
+        {
+            Result = Verdict.NoDescriptor;
+            Expected = 0;
+            Actual = 0;
+            return CheckOne(image, d, unpackDisabledByConfig);
+        }
+
+        /// <summary>
+        /// Mesma checagem para TODAS as secoes que o descritor declara: o packer
+        /// pode cifrar mais de uma (o CoD Mobile cifra .rodata, .text e o blob
+        /// il2cpp) e cada entrada carrega o seu proprio CRC32. Uma secao que nao
+        /// fecha reprova o arquivo inteiro - o veredito que sobra e o pior de
+        /// todos, e nao o da ultima secao conferida.
+        /// </summary>
+        public static bool Check(byte[] image, IReadOnlyList<FFProtector.Descriptor> sections,
+                                 bool unpackDisabledByConfig)
+        {
+            Result = Verdict.NoDescriptor;
+            Expected = 0;
+            Actual = 0;
+            if (sections == null || sections.Count == 0) return true;
+
+            bool ok = true;
+            var worst = Verdict.NoDescriptor;
+            uint expected = 0, actual = 0;
+            foreach (var d in sections)
+            {
+                if (!CheckOne(image, d, unpackDisabledByConfig)) ok = false;
+                if (Rank(Result) <= Rank(worst)) continue;
+                worst = Result;
+                expected = Expected;
+                actual = Actual;
+            }
+            Result = worst;
+            Expected = expected;
+            Actual = actual;
+            return ok;
+        }
+
+        private static int Rank(Verdict v) => v switch
+        {
+            Verdict.Mismatch => 3,
+            Verdict.NoChecksum => 2,
+            Verdict.Verified => 1,
+            _ => 0,
+        };
+
+        private static bool CheckOne(byte[] image, FFProtector.Descriptor d, bool unpackDisabledByConfig)
         {
             Result = Verdict.NoDescriptor;
             Expected = 0;

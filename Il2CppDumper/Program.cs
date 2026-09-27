@@ -147,12 +147,13 @@ namespace Il2CppDumper
             FFProtector.Report(unpack);
             FFProtector.Record(unpack);
             il2cppBytes = unpack.Data;
-            // O descritor do packer carrega o CRC32 da secao em claro, entao o
-            // buffer que vamos ler daqui pra frente e verificavel. Se nao fecha,
-            // recusar e a unica saida honesta: field offsets, instance sizes e
-            // metade dos Il2CppType vem de dentro da regiao cifrada, e um dump
-            // errado neles sai com nomes perfeitos e nenhum sinal de erro.
-            if (!FFSectionIntegrity.Check(il2cppBytes, unpack.Descriptor, unpack.SkippedByConfig))
+            // O descritor do packer carrega o CRC32 de CADA secao em claro (o
+            // CoD Mobile cifra tres), entao o buffer que vamos ler daqui pra
+            // frente e verificavel. Se nao fecha, recusar e a unica saida
+            // honesta: field offsets, instance sizes e metade dos Il2CppType vem
+            // de dentro da regiao cifrada, e um dump errado neles sai com nomes
+            // perfeitos e nenhum sinal de erro.
+            if (!FFSectionIntegrity.Check(il2cppBytes, unpack.SectionsToVerify, unpack.SkippedByConfig))
             {
                 il2Cpp = null;
                 return false;
