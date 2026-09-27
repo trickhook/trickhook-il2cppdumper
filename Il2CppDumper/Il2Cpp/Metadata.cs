@@ -287,23 +287,49 @@ namespace Il2CppDumper
             {
                 metadataUsageDic[(Il2CppMetadataUsage)i] = new SortedDictionary<uint, uint>();
             }
+            // As listas particionam a tabela de pares: cada par pertence a
+            // exatamente uma lista, entao a soma dos counts tem que caber nos
+            // pares. Quando nao cabe, os campos nao sao start/count de
+            // verdade - e o laco de baixo, que so confere o indice por dentro,
+            // rodaria essa soma inteira sem produzir nada.
+            //
+            // No Call of Duty Mobile (metadata v23) a soma da 143 TRILHOES
+            // para 945 mil pares: o dump ficava preso aqui para sempre. Uma
+            // tabela assim nao da para aproveitar nem em parte, porque nao se
+            // sabe qual campo e qual, entao o certo e dizer isso e seguir.
+            var declared = 0L;
+            foreach (var list in metadataUsageLists)
+            {
+                declared += list.count;
+                if (declared > metadataUsagePairs.Length) break;
+            }
+            if (declared > metadataUsagePairs.Length)
+            {
+                Console.WriteLine($"WARNING: the metadata usage lists claim at least {declared:N0} entries but only " +
+                                  $"{metadataUsagePairs.Length:N0} pairs exist, so the table is not usable. " +
+                                  "Metadata usage names will be missing from script.json; the rest of the dump is unaffected.");
+                metadataUsagesCount = 0;
+                return;
+            }
+
             foreach (var metadataUsageList in metadataUsageLists)
             {
-                for (int i = 0; i < metadataUsageList.count; i++)
+                if (metadataUsageList.start >= (uint)metadataUsagePairs.Length) continue;
+                var available = metadataUsagePairs.Length - (int)metadataUsageList.start;
+                var take = metadataUsageList.count > (uint)available ? available : (int)metadataUsageList.count;
+                for (int i = 0; i < take; i++)
                 {
                     var offset = metadataUsageList.start + i;
-                    if (offset >= metadataUsagePairs.Length)
-                    {
-                        continue;
-                    }
                     var metadataUsagePair = metadataUsagePairs[offset];
                     var usage = GetEncodedIndexType(metadataUsagePair.encodedSourceIndex);
+                    if (usage < 1 || usage > 6) continue;
                     var decodedIndex = GetDecodedMethodIndex(metadataUsagePair.encodedSourceIndex);
                     metadataUsageDic[(Il2CppMetadataUsage)usage][metadataUsagePair.destinationIndex] = decodedIndex;
                 }
             }
             //metadataUsagesCount = metadataUsagePairs.Max(x => x.destinationIndex) + 1;
             metadataUsagesCount = metadataUsageDic.Max(x => x.Value.Select(y => y.Key).DefaultIfEmpty().Max()) + 1;
+
         }
 
         public static uint GetEncodedIndexType(uint index)

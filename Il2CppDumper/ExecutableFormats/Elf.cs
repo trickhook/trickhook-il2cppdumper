@@ -156,9 +156,16 @@ namespace Il2CppDumper
 
         public override bool SymbolSearch()
         {
+            // Num dump de memoria a tabela de simbolos nem sempre e
+            // reconstruida, e o DT_STRTAB pode nao estar mapeado. Sem isto o
+            // metodo estoura com NullReference em vez de so dizer que nao
+            // achou - visto no Call of Duty Mobile.
+            if (symbolTable == null || dynamicSection == null) return false;
+            var strtab = dynamicSection.FirstOrDefault(x => x.d_tag == DT_STRTAB);
+            if (strtab == null) return false;
             uint codeRegistration = 0;
             uint metadataRegistration = 0;
-            var dynstrOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_STRTAB).d_un);
+            var dynstrOffset = MapVATR(strtab.d_un);
             foreach (var symbol in symbolTable)
             {
                 var name = ReadStringToNull(dynstrOffset + symbol.st_name);
