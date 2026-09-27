@@ -184,38 +184,108 @@ namespace Il2CppDumper
             }
         }
 
+        /// <summary>
+        /// Aplica as relocacoes do arquivo, e diz quantas e de onde.
+        ///
+        /// Existem duas fontes possiveis, e uma biblioteca pode trazer qualquer
+        /// uma das duas (o bionic tambem olha as duas de forma independente):
+        /// DT_RELA, a tabela crua de sempre, e DT_ANDROID_RELA, a mesma tabela
+        /// comprimida no formato APS2. O Call of Duty Mobile so tem a segunda,
+        /// e era por isso que todo ponteiro do .data.rel.ro dele lia como zero e
+        /// a busca de registrations terminava em 0.
+        ///
+        /// A contagem sai impressa de proposito: antes daqui o metodo dizia
+        /// "Applying relocations..." e engolia qualquer excecao, entao nao fazer
+        /// absolutamente nada era indistinguivel de funcionar.
+        /// </summary>
         private void RelocationProcessing()
         {
-            Console.WriteLine("Applying relocations...");
-            try
+            Console.Write("Applying relocations... ");
+            var reports = new List<string>();
+
+            var rela = dynamicSection.FirstOrDefault(x => x.d_tag == DT_RELA);
+            var relaSize = dynamicSection.FirstOrDefault(x => x.d_tag == DT_RELASZ);
+            if (rela != null && relaSize != null)
             {
-                var relaOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_RELA).d_un);
-                var relaSize = dynamicSection.First(x => x.d_tag == DT_RELASZ).d_un;
-                var relaTable = ReadClassArray<Elf64_Rela>(relaOffset, relaSize / 24L);
-                foreach (var rela in relaTable)
+                var tally = new RelocationTally();
+                try
                 {
-                    var type = rela.r_info & 0xffffffff;
-                    var sym = rela.r_info >> 32;
-                    (ulong value, bool recognized) result = (type, elfHeader.e_machine) switch
+                    var relaOffset = MapVATR(rela.d_un);
+                    var relaTable = ReadClassArray<Elf64_Rela>(relaOffset, relaSize.d_un / 24L);
+                    foreach (var entry in relaTable)
                     {
-                        (R_AARCH64_ABS64, EM_AARCH64) => (symbolTable[sym].st_value + rela.r_addend, true),
-                        (R_AARCH64_RELATIVE, EM_AARCH64) => (rela.r_addend, true),
-
-                        (R_X86_64_64, EM_X86_64) => (symbolTable[sym].st_value + rela.r_addend, true),
-                        (R_X86_64_RELATIVE, EM_X86_64) => (rela.r_addend, true),
-
-                        _ => (0, false)
-                    };
-                    if (result.recognized)
-                    {
-                        Position = MapVATR(rela.r_offset);
-                        Write(result.value);
+                        ApplyRelocation(entry.r_offset, entry.r_info, entry.r_addend, tally);
                     }
                 }
+                catch (Exception e)
+                {
+                    // Uma excecao aqui interrompe o resto da tabela, como sempre
+                    // interrompeu; a diferenca e que agora ela aparece.
+                    tally.Aborted = e;
+                }
+                reports.Add(tally.Describe("DT_RELA"));
             }
-            catch
+
+            var packed = dynamicSection.FirstOrDefault(x => x.d_tag == DT_ANDROID_RELA);
+            var packedSize = dynamicSection.FirstOrDefault(x => x.d_tag == DT_ANDROID_RELASZ);
+            if (packed != null && packedSize != null)
             {
-                // ignored
+                var tally = new RelocationTally();
+                try
+                {
+                    Position = MapVATR(packed.d_un);
+                    var blob = ReadBytes((int)packedSize.d_un);
+                    var table = ElfPackedRelocations.Decode(blob);
+                    tally.Note = table.Problem;
+                    if (table.Entries != null)
+                    {
+                        foreach (var entry in table.Entries)
+                        {
+                            ApplyRelocation(entry.Offset, entry.Info, entry.Addend, tally);
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    tally.Aborted = e;
+                }
+                reports.Add(tally.Describe("DT_ANDROID_RELA (APS2)"));
+            }
+
+            if (reports.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("WARNING: this file has no relocation table (neither DT_RELA nor " +
+                                  "DT_ANDROID_RELA), so pointers that the loader would have filled in " +
+                                  "will read as zero.");
+                return;
+            }
+            Console.WriteLine(string.Join("; ", reports));
+        }
+
+        private void ApplyRelocation(ulong r_offset, ulong r_info, ulong r_addend, RelocationTally tally)
+        {
+            var type = r_info & 0xffffffff;
+            var sym = r_info >> 32;
+            (ulong value, bool recognized) result = (type, elfHeader.e_machine) switch
+            {
+                (R_AARCH64_ABS64, EM_AARCH64) => (symbolTable[sym].st_value + r_addend, true),
+                (R_AARCH64_RELATIVE, EM_AARCH64) => (r_addend, true),
+
+                (R_X86_64_64, EM_X86_64) => (symbolTable[sym].st_value + r_addend, true),
+                (R_X86_64_RELATIVE, EM_X86_64) => (r_addend, true),
+
+                _ => (0, false)
+            };
+            if (result.recognized)
+            {
+                Position = MapVATR(r_offset);
+                Write(result.value);
+                tally.Applied++;
+            }
+            else
+            {
+                tally.Skip(type);
             }
         }
 

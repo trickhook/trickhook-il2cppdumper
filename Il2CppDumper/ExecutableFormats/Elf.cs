@@ -244,35 +244,110 @@ namespace Il2CppDumper
             }
         }
 
+        /// <summary>
+        /// Espelho de 32 bits do Elf64.RelocationProcessing: le a tabela crua
+        /// (DT_REL) e/ou a comprimida (DT_ANDROID_REL, formato APS2), e diz
+        /// quantas relocacoes aplicou e de onde em vez de sumir em silencio.
+        ///
+        /// O tratamento por tipo e exatamente o mesmo de antes, tambem no
+        /// caminho novo. Em 32 bits nao ha o que fazer com R_ARM_RELATIVE /
+        /// R_386_RELATIVE: no formato REL o addend e implicito, ou seja o valor
+        /// que ja esta no lugar, e a relocacao e "*P += ImageBase". Com
+        /// ImageBase 0, que e o caso de um arquivo em disco, isso nao muda nada,
+        /// e o relVA que o dumper quer ja esta gravado. Por isso elas aparecem
+        /// como skipped e nao como um furo.
+        /// </summary>
         private void RelocationProcessing()
         {
-            Console.WriteLine("Applying relocations...");
-            try
+            Console.Write("Applying relocations... ");
+            var reports = new List<string>();
+
+            var rel = dynamicSection.FirstOrDefault(x => x.d_tag == DT_REL);
+            var relSize = dynamicSection.FirstOrDefault(x => x.d_tag == DT_RELSZ);
+            if (rel != null && relSize != null)
             {
-                var reldynOffset = MapVATR(dynamicSection.First(x => x.d_tag == DT_REL).d_un);
-                var reldynSize = dynamicSection.First(x => x.d_tag == DT_RELSZ).d_un;
-                var relTable = ReadClassArray<Elf32_Rel>(reldynOffset, reldynSize / 8);
-                var isx86 = elfHeader.e_machine == 0x3;
-                foreach (var rel in relTable)
+                var tally = new RelocationTally();
+                try
                 {
-                    var type = rel.r_info & 0xff;
-                    var sym = rel.r_info >> 8;
-                    switch (type)
+                    var reldynOffset = MapVATR(rel.d_un);
+                    var relTable = ReadClassArray<Elf32_Rel>(reldynOffset, relSize.d_un / 8);
+                    foreach (var entry in relTable)
                     {
-                        case R_386_32 when isx86:
-                        case R_ARM_ABS32 when !isx86:
-                            {
-                                var symbol = symbolTable[sym];
-                                Position = MapVATR(rel.r_offset);
-                                Write(symbol.st_value);
-                                break;
-                            }
+                        ApplyRelocation(entry.r_offset, entry.r_info, tally);
                     }
                 }
+                catch (Exception e)
+                {
+                    tally.Aborted = e;
+                }
+                reports.Add(tally.Describe("DT_REL"));
             }
-            catch
+
+            var packed = dynamicSection.FirstOrDefault(x => x.d_tag == DT_ANDROID_REL);
+            var packedSize = dynamicSection.FirstOrDefault(x => x.d_tag == DT_ANDROID_RELSZ);
+            if (packed != null && packedSize != null)
             {
-                // ignored
+                var tally = new RelocationTally();
+                try
+                {
+                    Position = MapVATR(packed.d_un);
+                    var blob = ReadBytes((int)packedSize.d_un);
+                    var table = ElfPackedRelocations.Decode(blob);
+                    tally.Note = table.Problem;
+                    if (table.AnyAddend)
+                    {
+                        // O bionic recusa carregar um .so de 32 bits cuja tabela
+                        // empacotada traga addend, entao isto nao deveria
+                        // aparecer. Se aparecer, e mais provavel que a leitura
+                        // esteja errada do que a biblioteca.
+                        tally.Note = (tally.Note == null ? "" : tally.Note + "; ")
+                                     + "addends in a 32-bit packed table, which bionic rejects";
+                    }
+                    if (table.Entries != null)
+                    {
+                        foreach (var entry in table.Entries)
+                        {
+                            ApplyRelocation((uint)entry.Offset, (uint)entry.Info, tally);
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    tally.Aborted = e;
+                }
+                reports.Add(tally.Describe("DT_ANDROID_REL (APS2)"));
+            }
+
+            if (reports.Count == 0)
+            {
+                Console.WriteLine();
+                Console.WriteLine("WARNING: this file has no relocation table (neither DT_REL nor " +
+                                  "DT_ANDROID_REL), so pointers that the loader would have filled in " +
+                                  "will read as zero.");
+                return;
+            }
+            Console.WriteLine(string.Join("; ", reports));
+        }
+
+        private void ApplyRelocation(uint r_offset, uint r_info, RelocationTally tally)
+        {
+            var isx86 = elfHeader.e_machine == 0x3;
+            var type = r_info & 0xff;
+            var sym = r_info >> 8;
+            switch (type)
+            {
+                case R_386_32 when isx86:
+                case R_ARM_ABS32 when !isx86:
+                    {
+                        var symbol = symbolTable[sym];
+                        Position = MapVATR(r_offset);
+                        Write(symbol.st_value);
+                        tally.Applied++;
+                        break;
+                    }
+                default:
+                    tally.Skip(type);
+                    break;
             }
         }
 

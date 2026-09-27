@@ -178,6 +178,13 @@
         public const int DT_FINI_ARRAY = 26;
         public const int DT_GNU_HASH = 0x6ffffef5;
 
+        // Android packed relocations: a tabela vem comprimida no formato APS2 e
+        // DT_REL/DT_RELA nem aparecem. Ver ElfPackedRelocations.
+        public const int DT_ANDROID_REL = 0x6000000f;
+        public const int DT_ANDROID_RELSZ = 0x60000010;
+        public const int DT_ANDROID_RELA = 0x60000011;
+        public const int DT_ANDROID_RELASZ = 0x60000012;
+
         //sh_type
         public const uint SHT_LOUSER = 0x80000000;
 
